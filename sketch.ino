@@ -1,252 +1,196 @@
 #include <PinChangeInterrupt.h>
 #include <EEPROM.h>
 
-const int mosfet = 3;
-const int forcedStartButton = 4;
-const int timerButton = 5;
-const int floaterInterraption = 6;
-const int oilOKLed = 7;
-const int oilEMPTYLed = 8;
+#define DEBUG false
+
+constexpr int MOSFET = 3;
+constexpr int FORCED_START_BUTTON = 4;
+constexpr int TIMER_BUTTON = 5;
+constexpr int FLOATER_INTERRUPT  = 6;
+constexpr int OIL_OK_LED  = 7;
+constexpr int OIL_EMPTY_LED = 8;
+
+constexpr unsigned long MOTOR_DURATION = 6019; // 6 секунд 19 миллисекунд
+constexpr unsigned long TIMER_INTERVAL = 10000; // Интервал таймера (5 секунд)
+constexpr unsigned long SAVE_REMAINING_TIMER_TIME_INTERVAL = TIMER_INTERVAL / 5; // Интервал сохранения времени
+constexpr unsigned long DEFAULT_AFTER_MOTOR_TIMER_TIME = 2 * TIMER_INTERVAL + MOTOR_DURATION;
+
+constexpr unsigned long DEBOUNCE_DELAY = 200; // Задержка для устранения дребезга
+constexpr int EEPROM_ADDRESS = 0; // Адрес для сохранения времени
 
 volatile bool floaterInterraptionState;
 volatile bool forcedStartButtonState = false;
 volatile bool timerButtonState = false;
 
-// this type is needed for sum of result of millis and MOTOR_DURATION
-int64_t timerStartTime = 0; // Время начала отсчёта таймера
-// uint64_t timerStartTime = 0; // Время начала отсчёта таймера
-// unsigned long timerStartTime = 0; // Время начала отсчёта таймера
-const unsigned long TIMER_INTERVAL = 100000; // Интервал таймера (5 секунд)
-const unsigned long MOTOR_DURATION = 6019; // 6 секунд 19 миллисекунд
-bool timerActive = false; // Флаг активности таймера
+volatile unsigned long timerStartTime = 0; // Время окончания таймера
+volatile unsigned long lastSaveRemainingTimerTime = millis();
 
-// сохранять значение каждую пятую часть от таймера
-const unsigned long saveRemainingTimerTimeInterval = TIMER_INTERVAL / 5;
-unsigned long lastSaveRemainingTimerTime = millis();
+// bool timerActive = false; // Флаг активности таймера
+bool shouldSaveRemainingTime = true; // Флаг нужно ли сохранять оставшееся время
 
-#define DEBUG true
-
-void debugTime(){
-  if (DEBUG) {
-    Serial.print(millis());
-    Serial.print(" ");
-  }
-}
-
-void debugPrint(const char* message) {
-  if (DEBUG) {
-    Serial.print(message);
-  }
-}
-
-void debugPrintln(const char* message) {
-  if (DEBUG) {
-    Serial.println(message);
-  }
-}
-
-void debugPrintlnTimed(const char* message) {
-  if (DEBUG) {
-    debugTime();
-    Serial.println(message);
-  }
-}
-// print function; can be removed
-void debug_print_uint64_t(uint64_t num) {
-  if (DEBUG) {
-    // Function that can print uint64_t nums
-    char rev[128]; 
-    char *p = rev+1;
-
-    while (num > 0) {
-      // Serial.println('0' + (num % 10));
-      *p++ = '0' + (num % 10);
-      num /= 10;
-    }
-    p--;
-    /*Print the number which is now in reverse*/
-    while (p > rev) {
-      Serial.print(*p--);
-    }
-    Serial.println(*p);
-    // Serial.println();
-  }
-}
-
-// print function; can be removed
-void debug_print_int64_t(int64_t num) {
-  if (DEBUG) {
-    char rev[128]; 
-    char *p = rev+1;
-
-    if (num < 0) {
-        Serial.print('-');
-        num = -num;
-    }
-
-    while (num > 0) {
-        *p++ = '0' + (num % 10);
-        num /= 10;
-    }
-    p--;
-    /*Print the number which is now in reverse*/
-    while (p > rev) {
-        Serial.print(*p--);
-    }
-    // Serial.println(*p);
-  }
-}
+#define DEBUG_PRINT(x) if (DEBUG) { Serial.print(x); }
+#define DEBUG_PRINTLN(x) if (DEBUG) { Serial.println(x); }
+#define DEBUG_PRINT_TIME(x) if (DEBUG) { Serial.print(millis()); Serial.print(": "); Serial.println(x); }
+#define DEBUG_PRINTF(fmt, ...) if (DEBUG) { Serial.printf(fmt, __VA_ARGS__); }
 
 
 void changeTimerButtonState() {
   static unsigned long lastInterruptTime = 0;
   unsigned long interruptTime = millis();
-  if (interruptTime - lastInterruptTime > 200) {
+  if (interruptTime - lastInterruptTime > DEBOUNCE_DELAY) {
     timerButtonState = !timerButtonState;
     if (timerButtonState) {
-      timerActive = true; // Активируем таймер при нажатии кнопки
-      // timerStartTime = millis(); // Запоминаем время начала отсчёта
-      timerStartTime = (int64_t)millis() + loadRemainingTimerTimeFromEEPROM();
-      // debug_print_int64_t((int64_t)millis() - timerStartTime);
-      // debugPrintlnTimed(" ");
-      debugPrintlnTimed("Timer started");
+      // timerActive = true; // Активируем таймер при нажатии кнопки
+      // miliseconds that remains from the previous startup of the machine and hardcoded value to next lubrication
+      timerStartTime = loadRemainingTimerTimeFromEEPROM() + timerStartTime;
+      // Выставляем дефолтное время таймера, чтобы не срабатывало сразу же
+      if (timerStartTime == 0){
+        timerStartTime = 2 * TIMER_INTERVAL;
+      }
+      // В первом запуске не учитывается время работы мотора
+      timerStartTime = interruptTime + timerStartTime; // Запоминаем время начала отсчёта таймера
+      // Start save timer here to do not save one more time after timer is turned off
+      lastSaveRemainingTimerTime = interruptTime;
+      DEBUG_PRINT_TIME("Timer started");
     } else {
-      timerActive = false; // Деактивируем таймер при отпускании кнопки
-      debugPrintlnTimed("Timer stopped");
-      // Delete saved remaining time
-      saveRemainingTimerTimeToEEPROM(0);
+      // timerActive = false; // Деактивируем таймер при повторном нажатии кнопки
+      DEBUG_PRINT_TIME("Timer stopped");
+      if (shouldSaveRemainingTime && timerStartTime >= interruptTime){
+        // Timer is active
+        saveRemainingTimerTimeToEEPROM(timerStartTime - interruptTime);
+      }
+      timerStartTime = 0; // Сбрасываем предыдущий таймер
+      // saveRemainingTimerTimeToEEPROM(0); // Delete saved remaining time
     }
-  }
   lastInterruptTime = interruptTime;
+  }
 }
 
 void changeForcedStartState() {
   static unsigned long lastInterruptTime = 0;
   unsigned long interruptTime = millis();
-  if (interruptTime - lastInterruptTime > 200) {
+  if (interruptTime - lastInterruptTime > 400) {
     forcedStartButtonState = !forcedStartButtonState;
-    if (forcedStartButtonState && timerActive) {
-      timerStartTime = millis(); // Сбрасываем таймер при нажатии кнопки
-      debugPrintlnTimed("Timer reset");
+    if (forcedStartButtonState && timerButtonState) {
+      // При принудительном запуске, сброс таймера
+      timerStartTime = interruptTime + DEFAULT_AFTER_MOTOR_TIMER_TIME;
+      DEBUG_PRINT_TIME("Timer reset");
     }
+    lastInterruptTime = interruptTime;
   }
-  lastInterruptTime = interruptTime;
 }
 
 void changeOilState() {
   static unsigned long lastInterruptTime = 0;
   unsigned long interruptTime = millis();
-  if (interruptTime - lastInterruptTime > 200) {
+  if (interruptTime - lastInterruptTime > DEBOUNCE_DELAY) {
     floaterInterraptionState = !floaterInterraptionState;
-    digitalWrite(oilOKLed, !floaterInterraptionState);
-    digitalWrite(oilEMPTYLed, floaterInterraptionState);
+    digitalWrite(OIL_OK_LED, !floaterInterraptionState);
+    digitalWrite(OIL_EMPTY_LED, floaterInterraptionState);
   }
   lastInterruptTime = interruptTime;
 }
 
 void controlMotor(bool start) {
   static unsigned long motorStartTime = 0;
+  unsigned long call_time = millis();
 
-  if (motorStartTime > 0 && millis() - motorStartTime >= MOTOR_DURATION) {
-    digitalWrite(mosfet, LOW);
+  if (motorStartTime > 0 && call_time - motorStartTime >= MOTOR_DURATION) {
+    shouldSaveRemainingTime = true;
+    digitalWrite(MOSFET, LOW);
     motorStartTime = 0;
-    debugPrintlnTimed("mosfet=off");
+    DEBUG_PRINT_TIME("MOSFET=off");
   } else if (start && motorStartTime == 0) {
-    digitalWrite(mosfet, HIGH);
-    motorStartTime = millis();
-    debugPrintlnTimed("mosfet=on");
+    shouldSaveRemainingTime = false;
+    digitalWrite(MOSFET, HIGH);
+    motorStartTime = call_time;
+    DEBUG_PRINT_TIME("MOSFET=on");
   }
 }
 
-void saveRemainingTimerTimeToEEPROM(int64_t remainingTime) { 
-// #if defined(ESP8266)|| defined(ESP32)
-//         EEPROM.begin(512);
-// #endif
-  // Save value to EEPROM
-  debug_print_int64_t(remainingTime);
-  debugPrintln(" ");
-  EEPROM.put(0, remainingTime);
-// #if defined(ESP8266)|| defined(ESP32)
-//         EEPROM.commit();
-// #endif
-  debugTime();
-  debugPrint("Value ");
-  debug_print_int64_t(remainingTime);
-  debugPrint(" saved to EEPROM address: ");
-  debugPrintln(0);
+void saveRemainingTimerTimeToEEPROM(unsigned long remainingTime) { 
+  // #if defined(ESP8266)|| defined(ESP32)
+  //         EEPROM.begin(512);
+  // #endif
+  EEPROM.put(EEPROM_ADDRESS, remainingTime);
+  // #if defined(ESP8266)|| defined(ESP32)
+  //         EEPROM.commit();
+  // #endif
+  DEBUG_PRINTLN("Saved to EEPROM: "); 
+  DEBUG_PRINT_TIME(remainingTime);
 }
 
-int64_t loadRemainingTimerTimeFromEEPROM() {
-    int64_t _remainingTime;
-    EEPROM.get(0, _remainingTime);
-    debugPrint("Loaded remaining timer time(ms): ");
-    debug_print_int64_t(_remainingTime);
-    debugPrintln(" ");
-    if (_remainingTime <= 0){
-      return (int64_t)TIMER_INTERVAL;
-    } else {
-      return _remainingTime;
+unsigned long loadRemainingTimerTimeFromEEPROM() {
+    unsigned long remainingTime;
+    EEPROM.get(EEPROM_ADDRESS, remainingTime);
+    // If memory was empty before, it returns -1 but as unsigned long it is 2**32-1
+    if (remainingTime + 1 == 0) { // Проверка на неинициализированное значение
+      remainingTime = 0;
     }
+    DEBUG_PRINTLN("Loaded remaining timer time(ms): ");
+    DEBUG_PRINT_TIME(remainingTime);
+    return remainingTime;
 }
 
 void setup() {
-  Serial.begin(9600);
-  pinMode(mosfet, OUTPUT);
-  pinMode(oilOKLed, OUTPUT);
-  pinMode(oilEMPTYLed, OUTPUT);
+  if (DEBUG) Serial.begin(9600);
+  pinMode(MOSFET, OUTPUT);
+  pinMode(OIL_OK_LED , OUTPUT);
+  pinMode(OIL_EMPTY_LED, OUTPUT);
 
-  attachPCINT(digitalPinToPCINT(timerButton), changeTimerButtonState, CHANGE);
-  // timerButtonState = digitalRead(timerButton);
-  // timerStartTime = (int64_t)millis() + loadRemainingTimerTimeFromEEPROM();
-  // timerStartTime = (int64_t)millis() + 5000;
-  saveRemainingTimerTimeToEEPROM(5000);
-  timerStartTime = (int64_t)millis() + loadRemainingTimerTimeFromEEPROM();
-  debug_print_int64_t(timerStartTime);
+  attachPCINT(digitalPinToPCINT(TIMER_BUTTON), changeTimerButtonState, CHANGE);
+  // timerButtonState = digitalRead(TIMER_BUTTON);
+  // saveRemainingTimerTimeToEEPROM((unsigned long)15392);
 
-  while(1);
+  // unsigned long test = (millis() + 1000);
+  // Serial.println(test - millis());
+  // delay(1000);
+  // Serial.println(test - millis());
+  // while(1);
 
-  attachPCINT(digitalPinToPCINT(forcedStartButton), changeForcedStartState, CHANGE);
-  // forcedStartButtonState = digitalRead(forcedStartButton);
+  attachPCINT(digitalPinToPCINT(FORCED_START_BUTTON), changeForcedStartState, CHANGE);
 
-  attachPCINT(digitalPinToPCINT(floaterInterraption), changeOilState, CHANGE);
+  attachPCINT(digitalPinToPCINT(FLOATER_INTERRUPT), changeOilState, CHANGE);
 
-  floaterInterraptionState = digitalRead(floaterInterraption);
-  digitalWrite(oilOKLed, !floaterInterraptionState);
-  digitalWrite(oilEMPTYLed, floaterInterraptionState);
+  floaterInterraptionState = digitalRead(FLOATER_INTERRUPT);
+  digitalWrite(OIL_OK_LED , !floaterInterraptionState);
+  digitalWrite(OIL_EMPTY_LED, floaterInterraptionState);
 }
 
 void loop() {
+  unsigned long currentMillis = millis();
+  // Копируем volatile переменные в локальные
+  bool timerActive = timerButtonState;
+  bool forcedStart = forcedStartButtonState;
+  unsigned long timerStart = timerStartTime;
+  unsigned long lastSaveRemainingTimer = lastSaveRemainingTimerTime;
+
   // Проверка таймера
-  debug_print_int64_t(timerStartTime);
-  debugPrintln(" ");
-  if (timerActive && (int64_t)millis() - timerStartTime >= TIMER_INTERVAL) {
-    debugPrintlnTimed("Timer elapsed, starting motor");
+  if (timerActive && timerStart > currentMillis && timerStart - currentMillis <= TIMER_INTERVAL) {
+    DEBUG_PRINT_TIME("Timer elapsed, starting motor");
     controlMotor(true); // Включаем мотор по истечении таймера
-    // // timerActive = false; // Деактивируем таймер
     // При окончании таймера, сбрасываем таймер и прибавляем время, 
-    // которое необходимо на смазку, чтобы смазка по таймеру 
-    // не происходила сразу после принудительной смазки
-    timerStartTime = (int64_t)millis() + (int64_t)MOTOR_DURATION;
-    // Serial.println(millis());
-    // Serial.println(MOTOR_DURATION);
-    // print_int64_t(timerStartTime);
-    // print_int64_t((int64_t)millis() - timerStartTime);
-    // Serial.println(TIMER_INTERVAL);
+    // которое необходимо на смазку, и время таймера, 
+    // чтобы смазка по таймеру не происходила сразу после принудительной смазки
+    timerStartTime = timerStart = currentMillis + DEFAULT_AFTER_MOTOR_TIMER_TIME;
   }
 
   // Проверка принудительного запуска
-  if (forcedStartButtonState) {
-    debugPrintlnTimed("Forced start, starting motor");
-    forcedStartButtonState = false;
+  if (forcedStart) {
+    forcedStartButtonState = false;  // Очищаем volatile переменную
+    DEBUG_PRINT_TIME("Forced start, starting motor");
+    saveRemainingTimerTimeToEEPROM(0);
     controlMotor(true); // Включаем мотор принудительно
-    // При принудительном запуске, сброс таймера
-    timerStartTime = (int64_t)millis() + (int64_t)MOTOR_DURATION;
   }
 
-  if (timerActive && millis() - lastSaveRemainingTimerTime >= saveRemainingTimerTimeInterval){
-    // Save remaining time of timer for next session in case of earlier machine stop
-    saveRemainingTimerTimeToEEPROM(timerStartTime - (int64_t)millis());
-    lastSaveRemainingTimerTime = millis();
+  // Сохранение оставшегося времени в EEPROM
+  if (timerActive && currentMillis - lastSaveRemainingTimer >= SAVE_REMAINING_TIMER_TIME_INTERVAL){
+    // Save remaining time of timer for next session in case of earlier machine stop        
+    if (shouldSaveRemainingTime && timerStart > currentMillis){
+      // Timer is active
+      saveRemainingTimerTimeToEEPROM(timerStart - currentMillis);
+    }
+    lastSaveRemainingTimerTime = lastSaveRemainingTimer = currentMillis;
   }
 
   // Управление мотором

@@ -27,9 +27,9 @@ An Arduino-based automatic lubrication system for industrial machinery with time
 Key parameters in `sketch.ino`:
 
 ```cpp
-const unsigned long TIMER_INTERVAL = 100000;  // Timer interval (ms)
-const unsigned long MOTOR_DURATION = 6019;    // Motor run time (ms)
-#define DEBUG true                             // Enable/disable debug output
+constexpr unsigned long TIMER_INTERVAL = 10000;  // Timer interval (ms)
+constexpr unsigned long MOTOR_DURATION = 6019;   // Motor run time (ms)
+#define DEBUG false                              // Enable/disable debug output
 ```
 
 ## Dependencies
@@ -53,7 +53,9 @@ const unsigned long MOTOR_DURATION = 6019;    // Motor run time (ms)
 
 ## Wokwi Simulation
 
-This project includes Wokwi simulation files for testing without hardware.
+Test the project without hardware using the online simulator:
+
+**[Open in Wokwi Simulator](https://wokwi.com/projects/425883091765424129)**
 
 ## License
 
